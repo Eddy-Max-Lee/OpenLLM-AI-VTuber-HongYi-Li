@@ -1,0 +1,134 @@
+﻿diff --git a/src/open_llm_vtuber/routes.py b/src/open_llm_vtuber/routes.py
+index 15766fe..9b2c68a 100644
+--- a/src/open_llm_vtuber/routes.py
++++ b/src/open_llm_vtuber/routes.py
+@@ -10,6 +10,8 @@ from loguru import logger
+ from .service_context import ServiceContext
+ from .websocket_handler import WebSocketHandler
+ from .proxy_handler import ProxyHandler
++from .agent.output_types import DisplayText
++from .utils.stream_audio import prepare_audio_payload
+ 
+ 
+ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
+@@ -26,6 +28,50 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
+     router = APIRouter()
+     ws_handler = WebSocketHandler(default_context_cache)
+ 
++    @router.post("/local/announce")
++    async def local_announce(data: dict):
++        """Generate TTS for local automation text and broadcast it to connected clients."""
++        text = str(data.get("text", "")).strip()
++        if not text:
++            return JSONResponse({"error": "text is required"}, status_code=400)
++
++        if not ws_handler.client_connections:
++            return JSONResponse({"error": "no connected clients"}, status_code=409)
++
++        file_name = f"announce_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid4())[:8]}"
++        audio_path = None
++        try:
++            audio_path = await default_context_cache.tts_engine.async_generate_audio(
++                text=text,
++                file_name_no_ext=file_name,
++            )
++            payload = prepare_audio_payload(
++                audio_path=audio_path,
++                display_text=DisplayText(text=text, name=data.get("name", "市場播報")),
++            )
++
++            sent = 0
++            stale_clients = []
++            for client_uid, websocket in ws_handler.client_connections.items():
++                try:
++                    await websocket.send_text(json.dumps(payload))
++                    await websocket.send_text(json.dumps({"type": "backend-synth-complete"}))
++                    sent += 1
++                except Exception as exc:
++                    logger.warning(f"Failed to send local announcement to {client_uid}: {exc}")
++                    stale_clients.append(client_uid)
++
++            for client_uid in stale_clients:
++                await ws_handler.handle_disconnect(client_uid)
++
++            return {"status": "ok", "sent": sent, "text": text}
++        except Exception as exc:
++            logger.error(f"Local announcement failed: {exc}")
++            return JSONResponse({"error": str(exc)}, status_code=500)
++        finally:
++            if audio_path:
++                default_context_cache.tts_engine.remove_file(audio_path)
++
+     @router.websocket("/client-ws")
+     async def websocket_endpoint(websocket: WebSocket):
+         """WebSocket endpoint for client connections"""
+diff --git a/src/open_llm_vtuber/utils/stream_audio.py b/src/open_llm_vtuber/utils/stream_audio.py
+index c8ae52b..85e9bf4 100644
+--- a/src/open_llm_vtuber/utils/stream_audio.py
++++ b/src/open_llm_vtuber/utils/stream_audio.py
+@@ -1,9 +1,21 @@
+ import base64
++import os
++import subprocess
++import tempfile
+ from pydub import AudioSegment
+ from pydub.utils import make_chunks
+ from ..agent.output_types import Actions
+ from ..agent.output_types import DisplayText
+ 
++FFMPEG_EXE = None
++try:
++    import imageio_ffmpeg
++
++    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
++    AudioSegment.converter = FFMPEG_EXE
++except Exception:
++    pass
++
+ 
+ def _get_volume_by_chunks(audio: AudioSegment, chunk_length_ms: int) -> list:
+     """
+@@ -59,13 +71,42 @@ def prepare_audio_payload(
+             "forwarded": forwarded,
+         }
+ 
++    converted_wav_path = None
+     try:
+-        audio = AudioSegment.from_file(audio_path)
++        source_path = audio_path
++        if FFMPEG_EXE and not str(audio_path).lower().endswith(".wav"):
++            fd, converted_wav_path = tempfile.mkstemp(suffix=".wav")
++            os.close(fd)
++            subprocess.run(
++                [
++                    FFMPEG_EXE,
++                    "-y",
++                    "-i",
++                    audio_path,
++                    "-ar",
++                    "44100",
++                    "-ac",
++                    "1",
++                    converted_wav_path,
++                ],
++                check=True,
++                stdout=subprocess.DEVNULL,
++                stderr=subprocess.DEVNULL,
++            )
++            source_path = converted_wav_path
++
++        if str(source_path).lower().endswith(".wav"):
++            audio = AudioSegment.from_wav(source_path)
++        else:
++            audio = AudioSegment.from_file(source_path)
+         audio_bytes = audio.export(format="wav").read()
+     except Exception as e:
+         raise ValueError(
+             f"Error loading or converting generated audio file to wav file '{audio_path}': {e}"
+         )
++    finally:
++        if converted_wav_path and os.path.exists(converted_wav_path):
++            os.remove(converted_wav_path)
+     audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+     volumes = _get_volume_by_chunks(audio, chunk_length_ms)
+ 
