@@ -1,0 +1,10 @@
+{
+  "id": "btc_usdt",
+  "label": "BTC-USDT",
+  "provider": "binance_ticker",
+  "symbol": "BTCUSDT",
+  "speak_label": "BTC USDT",
+  "threshold_abs_usdt": 100,
+  "threshold_pct": 0.25,
+  "poll_interval_seconds": 60
+}

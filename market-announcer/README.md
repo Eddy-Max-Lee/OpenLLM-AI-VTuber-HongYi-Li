@@ -1,22 +1,20 @@
-# BTC Price Announcer
+# Market Announcer
 
-This local helper records the current BTC-USDT price every minute and only speaks through Open-LLM-VTuber when the move from the last announced reference price is large enough.
+This helper reads shared control state from `app_config/state.json` and announces every enabled source through Open-LLM-VTuber.
 
-It uses free public price endpoints and only writes a local CSV log. No paid historical data source is required.
+Current sample sources:
 
-Default source order:
+- `btc_usdt`
+- `eth_usdt`
+- `sol_usdt`
 
-1. Binance public ticker price endpoint
-2. CoinGecko simple price endpoint
-3. Coinbase product ticker endpoint
+Behavior:
 
-Default trigger:
-
-- Record every `60` seconds.
-- Speak only when BTC-USDT moves at least `100 USDT` or `0.25%` from the last announced reference price.
-- The first sample is only used as the initial reference and is not spoken.
-- After a real announcement, the reference price resets to the announced price.
-- Spoken templates include the direction and a short recent trend such as `短線趨勢偏上`, `短線趨勢偏下`, or `短線還在震盪`.
+- Poll enabled sources every `60` seconds by default.
+- Keep one reference price per source.
+- Speak only when the latest price crosses that source's configured absolute or percentage threshold.
+- Reset the reference only after a real announcement for that source.
+- Use the currently selected persona's `speaker_name` as the display name.
 
 Configuration is in `.env`:
 

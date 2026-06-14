@@ -1,0 +1,10 @@
+{
+  "id": "eth_usdt",
+  "label": "ETH-USDT",
+  "provider": "binance_ticker",
+  "symbol": "ETHUSDT",
+  "speak_label": "ETH USDT",
+  "threshold_abs_usdt": 20,
+  "threshold_pct": 0.8,
+  "poll_interval_seconds": 60
+}

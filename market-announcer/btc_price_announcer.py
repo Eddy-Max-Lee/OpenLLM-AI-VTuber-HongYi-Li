@@ -15,11 +15,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+APP_CONFIG_ROOT = ROOT.parent / "app_config"
+STATE_PATH = APP_CONFIG_ROOT / "state.json"
+PERSONAS_DIR = APP_CONFIG_ROOT / "personas"
+ANNOUNCES_DIR = APP_CONFIG_ROOT / "announces"
+
 DEFAULT_TEMPLATES = [
-    "市場波動提醒，BTC USDT 相對上次播報{direction}約 {change} USDT，目前約 {price} USDT，{trend}。",
-    "BTC USDT 跟上次播報相比{direction} {change_pct}%，現價約 {price} USDT，{trend}。",
-    "價格跳動比較明顯，BTC USDT 目前約 {price} USDT，相對上次播報{direction}約 {change} USDT，{trend}。",
-    "更新一下，BTC USDT 從上次播報到現在變動約 {change_pct}%，目前在 {price} USDT 附近，{trend}。",
+    "{label} 相對上次播報{direction}約 {change} USDT，目前約 {price} USDT，{trend}。",
+    "{label} 跟上次播報相比{direction} {change_pct}%，現價約 {price} USDT，{trend}。",
+    "{label} 現在約 {price} USDT，相對上次播報{direction}約 {change} USDT，{trend}。",
+    "{label} 從上次播報到現在變動約 {change_pct}%，目前在 {price} USDT 附近，{trend}。",
 ]
 
 
@@ -59,11 +64,49 @@ def env_decimal(name: str, default: str) -> Decimal:
         return Decimal(default)
 
 
+def read_json(path: Path, default):
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_state() -> dict:
+    return read_json(
+        STATE_PATH,
+        {
+            "selected_persona_id": "hungyi_tutor",
+            "selected_skin_id": "mao_pro",
+            "enabled_announce_ids": ["btc_usdt"],
+        },
+    )
+
+
+def load_persona() -> dict:
+    state = load_state()
+    persona_id = str(state.get("selected_persona_id", "hungyi_tutor")).strip()
+    return read_json(PERSONAS_DIR / f"{persona_id}.json", {})
+
+
+def load_enabled_sources() -> list[dict]:
+    state = load_state()
+    enabled_ids = [
+        str(item).strip()
+        for item in state.get("enabled_announce_ids", [])
+        if str(item).strip()
+    ]
+    sources = []
+    for source_id in enabled_ids:
+        data = read_json(ANNOUNCES_DIR / f"{source_id}.json", {})
+        if data:
+            sources.append(data)
+    return sources
+
+
 def get_json(url: str, timeout: int = 10) -> dict:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "hongyi-vtuber-market-announcer/0.2",
+            "User-Agent": "hongyi-vtuber-market-announcer/0.3",
             "Accept": "application/json",
         },
     )
@@ -75,32 +118,17 @@ def decimal_price(value: object) -> Decimal:
     return Decimal(str(value))
 
 
-def fetch_binance_btcusdt() -> tuple[Decimal, str]:
-    data = get_json("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+def fetch_price_for_source(source: dict) -> tuple[Decimal, str]:
+    provider = str(source.get("provider", "binance_ticker")).strip()
+    if provider != "binance_ticker":
+        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    symbol = str(source.get("symbol", "")).strip().upper()
+    if not symbol:
+        raise RuntimeError("symbol is required for binance_ticker source")
+
+    data = get_json(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
     return decimal_price(data["price"]), "Binance"
-
-
-def fetch_coingecko_btc_usd() -> tuple[Decimal, str]:
-    data = get_json(
-        "https://api.coingecko.com/api/v3/simple/price"
-        "?ids=bitcoin&vs_currencies=usd"
-    )
-    return decimal_price(data["bitcoin"]["usd"]), "CoinGecko"
-
-
-def fetch_coinbase_btc_usdt() -> tuple[Decimal, str]:
-    data = get_json("https://api.exchange.coinbase.com/products/BTC-USDT/ticker")
-    return decimal_price(data["price"]), "Coinbase"
-
-
-def fetch_price() -> tuple[Decimal, str]:
-    errors: list[str] = []
-    for fetcher in (fetch_binance_btcusdt, fetch_coingecko_btc_usd, fetch_coinbase_btc_usdt):
-        try:
-            return fetcher()
-        except Exception as exc:
-            errors.append(f"{fetcher.__name__}: {type(exc).__name__}: {exc}")
-    raise RuntimeError("All price sources failed: " + " | ".join(errors))
 
 
 def format_price(price: Decimal) -> str:
@@ -127,10 +155,6 @@ def load_templates() -> list[str]:
         ]
         if templates:
             return templates
-
-    single_template = os.getenv("SPEAK_TEMPLATE", "").strip()
-    if single_template:
-        return [single_template]
     return DEFAULT_TEMPLATES
 
 
@@ -138,6 +162,10 @@ def sanitize_for_speech(text: str) -> str:
     replacements = {
         "BTC-USDT": "BTC USDT",
         "BTC_USDT": "BTC USDT",
+        "ETH-USDT": "ETH USDT",
+        "ETH_USDT": "ETH USDT",
+        "SOL-USDT": "SOL USDT",
+        "SOL_USDT": "SOL USDT",
         "#": "",
         "_": " ",
         "*": "",
@@ -171,11 +199,13 @@ def describe_trend(samples: list[Decimal]) -> str:
 
 
 def build_sentence(
+    source: dict,
     price: Decimal,
-    reference_price: Decimal | None = None,
-    trend: str = "短線趨勢還不明顯",
+    reference_price: Decimal | None,
+    trend: str,
 ) -> str:
     template = random.choice(load_templates())
+    label = str(source.get("speak_label", source.get("label", source.get("id", "市場"))))
     if reference_price is None:
         change = Decimal("0")
         change_pct = Decimal("0")
@@ -187,6 +217,7 @@ def build_sentence(
 
     return sanitize_for_speech(
         template.format(
+            label=label,
             price=format_price(price),
             change=format_price(abs(change)),
             change_pct=format_pct(change_pct),
@@ -196,12 +227,17 @@ def build_sentence(
     )
 
 
-def post_announcement(text: str) -> dict:
+def speaker_name() -> str:
+    persona = load_persona()
+    return str(persona.get("speaker_name", os.getenv("SPEAKER_NAME", "市場播報"))).strip()
+
+
+def post_announcement(text: str, name: str) -> dict:
     url = os.getenv("VTUBER_ANNOUNCE_URL", "http://127.0.0.1:12393/local/announce")
     payload = json.dumps(
         {
             "text": text,
-            "name": os.getenv("SPEAKER_NAME", "市場播報"),
+            "name": name,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -220,7 +256,8 @@ def post_announcement(text: str) -> dict:
 
 def append_price_log(
     path: Path,
-    source: str,
+    source: dict,
+    provider_name: str,
     price: Decimal,
     reference_price: Decimal | None,
     action: str,
@@ -241,7 +278,9 @@ def append_price_log(
             writer.writerow(
                 [
                     "timestamp_utc",
-                    "source",
+                    "announce_id",
+                    "label",
+                    "provider",
                     "price",
                     "reference_price",
                     "change_since_reference_usdt",
@@ -253,7 +292,9 @@ def append_price_log(
         writer.writerow(
             [
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                source,
+                source.get("id", ""),
+                source.get("label", ""),
+                provider_name,
                 f"{price:f}",
                 f"{reference_price:f}" if reference_price is not None else "",
                 f"{change:f}",
@@ -286,37 +327,39 @@ def should_announce(
 
 
 def announce_price(
+    source: dict,
+    provider_name: str,
     price: Decimal,
-    source: str,
     reference_price: Decimal | None,
     trend: str,
-    dry_run: bool = False,
+    dry_run: bool,
 ) -> str:
-    sentence = build_sentence(price, reference_price, trend)
+    sentence = build_sentence(source, price, reference_price, trend)
+    name = speaker_name()
     if dry_run:
-        print(f"[dry-run] {source}: {sentence}", flush=True)
+        print(f"[dry-run] {source.get('id')} {provider_name}: {sentence}", flush=True)
     else:
-        result = post_announcement(sentence)
-        print(f"[sent] {source}: {sentence} -> {result}", flush=True)
+        result = post_announcement(sentence, name)
+        print(f"[sent] {source.get('id')} {provider_name}: {sentence} -> {result}", flush=True)
     return sentence
 
 
 def main() -> int:
     load_env()
-    parser = argparse.ArgumentParser(description="Announce BTC-USDT price through Open-LLM-VTuber.")
-    parser.add_argument("--once", action="store_true", help="Fetch one price sample and exit.")
+    parser = argparse.ArgumentParser(description="Run multi-source market announcements through Open-LLM-VTuber.")
+    parser.add_argument("--once", action="store_true", help="Fetch one round of enabled sources and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Print the sentence without speaking.")
     parser.add_argument("--force-speak", action="store_true", help="Speak even if no large move is detected.")
     parser.add_argument("--pid-file", help="Write the current process id to this file while running.")
     args = parser.parse_args()
 
-    poll_interval = max(5, env_int("POLL_INTERVAL_SECONDS", 60))
-    abs_threshold = env_decimal("LARGE_MOVE_ABS_USDT", "100")
-    pct_threshold = env_decimal("LARGE_MOVE_PCT", "0.25")
+    default_poll_interval = max(5, env_int("POLL_INTERVAL_SECONDS", 60))
+    default_abs_threshold = env_decimal("LARGE_MOVE_ABS_USDT", "100")
+    default_pct_threshold = env_decimal("LARGE_MOVE_PCT", "0.25")
     speak_on_first_sample = env_bool("SPEAK_ON_FIRST_SAMPLE", False)
     log_path = ROOT / os.getenv("PRICE_LOG_PATH", "btc_price_log.csv")
-    reference_price: Decimal | None = None
-    recent_samples: list[Decimal] = []
+    reference_prices: dict[str, Decimal] = {}
+    recent_samples: dict[str, list[Decimal]] = {}
     stop_requested = False
 
     def request_stop(signum, frame):
@@ -332,38 +375,82 @@ def main() -> int:
 
     try:
         while not stop_requested:
-            try:
-                price, source = fetch_price()
-                recent_samples.append(price)
-                recent_samples = recent_samples[-5:]
-                trend = describe_trend(recent_samples)
-                speak, reason = should_announce(
-                    price,
-                    reference_price,
-                    abs_threshold,
-                    pct_threshold,
-                    speak_on_first_sample,
-                )
-                if args.force_speak:
-                    speak, reason = True, "force-speak"
+            enabled_sources = load_enabled_sources()
+            if not enabled_sources:
+                print("[record] no enabled announce sources", flush=True)
+            for source in enabled_sources:
+                source_id = str(source.get("id", "")).strip()
+                if not source_id:
+                    continue
+                try:
+                    price, provider_name = fetch_price_for_source(source)
+                    samples = recent_samples.setdefault(source_id, [])
+                    samples.append(price)
+                    recent_samples[source_id] = samples[-5:]
+                    trend = describe_trend(recent_samples[source_id])
+                    reference_price = reference_prices.get(source_id)
+                    abs_threshold = env_decimal(
+                        "LARGE_MOVE_ABS_USDT",
+                        str(source.get("threshold_abs_usdt", default_abs_threshold)),
+                    )
+                    pct_threshold = env_decimal(
+                        "LARGE_MOVE_PCT",
+                        str(source.get("threshold_pct", default_pct_threshold)),
+                    )
+                    speak, reason = should_announce(
+                        price,
+                        reference_price,
+                        abs_threshold,
+                        pct_threshold,
+                        speak_on_first_sample,
+                    )
+                    if args.force_speak:
+                        speak, reason = True, "force-speak"
 
-                if speak:
-                    announce_price(price, source, reference_price, trend, dry_run=args.dry_run)
-                    action = "speak-dry-run" if args.dry_run else "speak"
-                else:
-                    print(f"[record] {source}: {format_price(price)} USDT ({reason})", flush=True)
-                    action = "record"
+                    if speak:
+                        announce_price(
+                            source,
+                            provider_name,
+                            price,
+                            reference_price,
+                            trend,
+                            dry_run=args.dry_run,
+                        )
+                        action = "speak-dry-run" if args.dry_run else "speak"
+                    else:
+                        print(
+                            f"[record] {source_id} {provider_name}: {format_price(price)} USDT ({reason})",
+                            flush=True,
+                        )
+                        action = "record"
 
-                append_price_log(log_path, source, price, reference_price, action, reason)
-                if reference_price is None or speak:
-                    reference_price = price
-            except Exception as exc:
-                print(f"[error] {type(exc).__name__}: {exc}", flush=True)
+                    append_price_log(
+                        log_path,
+                        source,
+                        provider_name,
+                        price,
+                        reference_price,
+                        action,
+                        reason,
+                    )
+                    if reference_price is None or speak:
+                        reference_prices[source_id] = price
+                except Exception as exc:
+                    print(f"[error] {source_id} {type(exc).__name__}: {exc}", flush=True)
 
             if args.once:
                 return 0
 
-            for _ in range(poll_interval):
+            sleep_seconds = default_poll_interval
+            if enabled_sources:
+                sleep_seconds = max(
+                    5,
+                    min(
+                        int(source.get("poll_interval_seconds", default_poll_interval))
+                        for source in enabled_sources
+                    ),
+                )
+            for _ in range(sleep_seconds):
                 if stop_requested:
                     break
                 time.sleep(1)

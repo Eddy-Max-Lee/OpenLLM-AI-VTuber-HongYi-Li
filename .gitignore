@@ -10,6 +10,8 @@ hungyi-rag-proxy/__pycache__/
 hungyi-rag-proxy/.pytest_cache/
 hungyi-rag-proxy/proxy.out.log
 hungyi-rag-proxy/proxy.err.log
+hungyi-rag-proxy/proxy.restart.out.log
+hungyi-rag-proxy/proxy.restart.err.log
 
 market-announcer/announcer.out.log
 market-announcer/announcer.err.log

@@ -1,0 +1,10 @@
+{
+  "id": "sol_usdt",
+  "label": "SOL-USDT",
+  "provider": "binance_ticker",
+  "symbol": "SOLUSDT",
+  "speak_label": "SOL USDT",
+  "threshold_abs_usdt": 3,
+  "threshold_pct": 1.2,
+  "poll_interval_seconds": 60
+}

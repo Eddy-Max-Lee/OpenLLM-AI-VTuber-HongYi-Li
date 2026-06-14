@@ -18,6 +18,9 @@ from pydantic import BaseModel, Field
 
 
 ROOT = Path(__file__).resolve().parent
+APP_CONFIG_ROOT = ROOT.parent / "app_config"
+STATE_PATH = APP_CONFIG_ROOT / "state.json"
+PERSONAS_DIR = APP_CONFIG_ROOT / "personas"
 load_dotenv(ROOT / ".env")
 
 MODEL_ID = "hungyi-rag-proxy"
@@ -65,7 +68,24 @@ app = FastAPI(title="Hung-Yi Inspired RAG Proxy", version="0.1.0")
 
 
 def read_system_prompt() -> str:
+    persona = selected_persona()
+    rag_prompt = str(persona.get("rag_system_prompt", "")).strip()
+    if rag_prompt:
+        return rag_prompt
     return PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _read_json(path: Path, default):
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def selected_persona() -> dict[str, Any]:
+    state = _read_json(STATE_PATH, {"selected_persona_id": "hungyi_tutor"})
+    persona_id = str(state.get("selected_persona_id", "hungyi_tutor")).strip()
+    persona_path = PERSONAS_DIR / f"{persona_id}.json"
+    return _read_json(persona_path, {})
 
 
 def message_text(content: Any) -> str:
@@ -331,11 +351,13 @@ def sse_chunks(answer: str):
 @app.get("/health")
 def health() -> dict[str, str]:
     backend = "hung-yi-lee-skill-cli" if skill_cli_available() else "fallback-file-search"
+    persona = selected_persona()
     return {
         "status": "ok",
         "rag_backend": backend,
         "upstream_mode": UPSTREAM_MODE,
         "upstream_base_url": UPSTREAM_BASE_URL if UPSTREAM_MODE == "openai_compatible" else OLLAMA_BASE_URL,
+        "selected_persona_id": str(persona.get("id", "")),
     }
 
 

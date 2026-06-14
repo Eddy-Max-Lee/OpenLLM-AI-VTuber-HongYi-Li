@@ -1,20 +1,251 @@
-﻿diff --git a/src/open_llm_vtuber/routes.py b/src/open_llm_vtuber/routes.py
-index 15766fe..9b2c68a 100644
+﻿diff --git a/run_server.py b/run_server.py
+index 510ca20..a86ea33 100644
+--- a/run_server.py
++++ b/run_server.py
+@@ -12,6 +12,7 @@ from upgrade_codes.upgrade_manager import UpgradeManager
+ 
+ from src.open_llm_vtuber.server import WebSocketServer
+ from src.open_llm_vtuber.config_manager import Config, read_yaml, validate_config
++from src.open_llm_vtuber.local_control import build_controlled_config
+ 
+ os.environ["HF_HOME"] = str(Path(__file__).parent / "models")
+ os.environ["MODELSCOPE_CACHE"] = str(Path(__file__).parent / "models")
+@@ -137,6 +138,7 @@ def run(console_log_level: str):
+ 
+     # Load configurations from yaml file
+     config: Config = validate_config(read_yaml("conf.yaml"))
++    config = build_controlled_config(config)
+     server_config = config.system_config
+ 
+     if server_config.enable_proxy:
+diff --git a/src/open_llm_vtuber/local_control.py b/src/open_llm_vtuber/local_control.py
+new file mode 100644
+index 0000000..b853cda
+--- /dev/null
++++ b/src/open_llm_vtuber/local_control.py
+@@ -0,0 +1,142 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++from .config_manager import validate_config
++
++
++WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
++APP_CONFIG_ROOT = WORKSPACE_ROOT / "app_config"
++STATE_PATH = APP_CONFIG_ROOT / "state.json"
++PERSONAS_DIR = APP_CONFIG_ROOT / "personas"
++SKINS_DIR = APP_CONFIG_ROOT / "skins"
++ANNOUNCES_DIR = APP_CONFIG_ROOT / "announces"
++
++
++def _read_json(path: Path, default: Any):
++    if not path.exists():
++        return default
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def _write_json(path: Path, data: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++
++
++def load_state() -> dict[str, Any]:
++    return _read_json(
++        STATE_PATH,
++        {
++            "selected_persona_id": "hungyi_tutor",
++            "selected_skin_id": "mao_pro",
++            "enabled_announce_ids": ["btc_usdt"],
++        },
++    )
++
++
++def save_state(state: dict[str, Any]) -> dict[str, Any]:
++    normalized = {
++        "selected_persona_id": str(state.get("selected_persona_id", "hungyi_tutor")).strip(),
++        "selected_skin_id": str(state.get("selected_skin_id", "mao_pro")).strip(),
++        "enabled_announce_ids": sorted(
++            {
++                str(item).strip()
++                for item in state.get("enabled_announce_ids", [])
++                if str(item).strip()
++            }
++        ),
++    }
++    _write_json(STATE_PATH, normalized)
++    return normalized
++
++
++def _load_catalog(directory: Path) -> list[dict[str, Any]]:
++    items = []
++    if not directory.exists():
++        return items
++
++    for path in sorted(directory.glob("*.json")):
++        data = _read_json(path, {})
++        if data:
++            items.append(data)
++    return items
++
++
++def load_catalogs() -> dict[str, list[dict[str, Any]]]:
++    return {
++        "personas": _load_catalog(PERSONAS_DIR),
++        "skins": _load_catalog(SKINS_DIR),
++        "announces": _load_catalog(ANNOUNCES_DIR),
++    }
++
++
++def _catalog_map(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
++    return {
++        str(item.get("id", "")).strip(): item
++        for item in items
++        if str(item.get("id", "")).strip()
++    }
++
++
++def resolve_selection() -> dict[str, Any]:
++    state = load_state()
++    catalogs = load_catalogs()
++
++    personas = _catalog_map(catalogs["personas"])
++    skins = _catalog_map(catalogs["skins"])
++    announces = _catalog_map(catalogs["announces"])
++
++    persona = personas.get(state["selected_persona_id"]) or next(iter(personas.values()), {})
++    skin = skins.get(state["selected_skin_id"]) or next(iter(skins.values()), {})
++    enabled_announce_ids = [
++        announce_id
++        for announce_id in state.get("enabled_announce_ids", [])
++        if announce_id in announces
++    ]
++
++    if persona and state.get("selected_persona_id") != persona.get("id"):
++        state["selected_persona_id"] = persona.get("id")
++    if skin and state.get("selected_skin_id") != skin.get("id"):
++        state["selected_skin_id"] = skin.get("id")
++    if enabled_announce_ids != state.get("enabled_announce_ids", []):
++        state["enabled_announce_ids"] = enabled_announce_ids
++    save_state(state)
++
++    return {
++        "state": state,
++        "catalogs": catalogs,
++        "persona": persona,
++        "skin": skin,
++        "enabled_announces": [announces[item] for item in enabled_announce_ids],
++    }
++
++
++def build_controlled_config(base_config) -> Any:
++    selected = resolve_selection()
++    persona = selected["persona"]
++    skin = selected["skin"]
++
++    config_dict = base_config.model_dump(by_alias=True)
++    character = config_dict["character_config"]
++
++    if persona:
++        persona_id = persona["id"]
++        skin_id = skin.get("id", "skin") if skin else "skin"
++        character["conf_name"] = f"{persona_id}_{skin_id}"
++        character["conf_uid"] = f"{persona_id}_{skin_id}"
++        character["character_name"] = persona.get(
++            "character_name",
++            character.get("character_name", "AI"),
++        )
++        if persona.get("vtuber_persona_prompt"):
++            character["persona_prompt"] = persona["vtuber_persona_prompt"]
++
++    if skin:
++        if skin.get("live2d_model_name"):
++            character["live2d_model_name"] = skin["live2d_model_name"]
++        character["avatar"] = skin.get("avatar", character.get("avatar", ""))
++
++    return validate_config(config_dict)
+diff --git a/src/open_llm_vtuber/routes.py b/src/open_llm_vtuber/routes.py
+index 15766fe..037eee2 100644
 --- a/src/open_llm_vtuber/routes.py
 +++ b/src/open_llm_vtuber/routes.py
-@@ -10,6 +10,8 @@ from loguru import logger
+@@ -10,6 +10,9 @@ from loguru import logger
  from .service_context import ServiceContext
  from .websocket_handler import WebSocketHandler
  from .proxy_handler import ProxyHandler
 +from .agent.output_types import DisplayText
 +from .utils.stream_audio import prepare_audio_payload
++from .local_control import resolve_selection, save_state, build_controlled_config
  
  
  def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
-@@ -26,6 +28,50 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
+@@ -26,6 +29,112 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
      router = APIRouter()
      ws_handler = WebSocketHandler(default_context_cache)
  
++    async def apply_control_state() -> dict:
++        new_config = build_controlled_config(default_context_cache.config)
++        await default_context_cache.load_from_config(new_config)
++
++        for client_uid, context in list(ws_handler.client_contexts.items()):
++            websocket = ws_handler.client_connections.get(client_uid)
++            if websocket is None:
++                continue
++            await context.load_from_config(new_config.model_copy(deep=True))
++            await websocket.send_text(
++                json.dumps(
++                    {
++                        "type": "set-model-and-conf",
++                        "model_info": context.live2d_model.model_info,
++                        "conf_name": context.character_config.conf_name,
++                        "conf_uid": context.character_config.conf_uid,
++                        "client_uid": client_uid,
++                    }
++                )
++            )
++            await websocket.send_text(
++                json.dumps(
++                    {
++                        "type": "config-switched",
++                        "message": "Local control state applied",
++                    }
++                )
++            )
++
++        return resolve_selection()
++
++    @router.get("/control-panel")
++    async def control_panel_redirect():
++        return Response(status_code=302, headers={"Location": "/web-tool/control-panel.html"})
++
++    @router.get("/local-control/catalog")
++    async def local_control_catalog():
++        selection = resolve_selection()
++        return JSONResponse(selection)
++
++    @router.get("/local-control/state")
++    async def local_control_state():
++        return JSONResponse(resolve_selection()["state"])
++
++    @router.put("/local-control/state")
++    async def update_local_control_state(data: dict):
++        current = resolve_selection()["state"]
++        next_state = {
++            "selected_persona_id": data.get(
++                "selected_persona_id", current["selected_persona_id"]
++            ),
++            "selected_skin_id": data.get(
++                "selected_skin_id", current["selected_skin_id"]
++            ),
++            "enabled_announce_ids": data.get(
++                "enabled_announce_ids", current["enabled_announce_ids"]
++            ),
++        }
++        save_state(next_state)
++        selection = await apply_control_state()
++        return JSONResponse(selection)
++
 +    @router.post("/local/announce")
 +    async def local_announce(data: dict):
 +        """Generate TTS for local automation text and broadcast it to connected clients."""
@@ -132,3 +363,258 @@ index c8ae52b..85e9bf4 100644
      audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
      volumes = _get_volume_by_chunks(audio, chunk_length_ms)
  
+diff --git a/web_tool/control-panel.html b/web_tool/control-panel.html
+new file mode 100644
+index 0000000..f7b9103
+--- /dev/null
++++ b/web_tool/control-panel.html
+@@ -0,0 +1,249 @@
++<!DOCTYPE html>
++<html lang="zh-Hant">
++<head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <title>Local Control Panel</title>
++    <style>
++        :root {
++            color-scheme: light;
++            --bg: #f3efe7;
++            --panel: #fffaf1;
++            --ink: #1d1d1f;
++            --muted: #5c5c63;
++            --line: #d6cab7;
++            --accent: #b76e32;
++            --accent-strong: #8c4d17;
++        }
++        body {
++            margin: 0;
++            font-family: "Segoe UI", "Noto Sans TC", sans-serif;
++            background: linear-gradient(180deg, #f8f3ea 0%, var(--bg) 100%);
++            color: var(--ink);
++        }
++        main {
++            max-width: 960px;
++            margin: 0 auto;
++            padding: 24px;
++        }
++        h1 {
++            margin: 0 0 8px;
++            font-size: 28px;
++        }
++        p {
++            color: var(--muted);
++        }
++        .grid {
++            display: grid;
++            gap: 16px;
++            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
++        }
++        .panel {
++            background: var(--panel);
++            border: 1px solid var(--line);
++            border-radius: 10px;
++            padding: 18px;
++            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05);
++        }
++        label {
++            display: block;
++            font-size: 14px;
++            color: var(--muted);
++            margin-bottom: 8px;
++        }
++        select, button {
++            width: 100%;
++            font-size: 15px;
++            padding: 10px 12px;
++            border-radius: 8px;
++            border: 1px solid var(--line);
++            box-sizing: border-box;
++        }
++        button {
++            cursor: pointer;
++            background: var(--accent);
++            border: none;
++            color: white;
++            font-weight: 600;
++        }
++        button:hover {
++            background: var(--accent-strong);
++        }
++        .announce-list {
++            display: grid;
++            gap: 10px;
++        }
++        .announce-item {
++            display: flex;
++            gap: 10px;
++            align-items: start;
++            border: 1px solid var(--line);
++            border-radius: 8px;
++            padding: 10px;
++            background: white;
++        }
++        .announce-item input {
++            margin-top: 3px;
++        }
++        .meta {
++            font-size: 13px;
++            color: var(--muted);
++        }
++        .status {
++            margin-top: 12px;
++            min-height: 24px;
++            font-size: 14px;
++            color: var(--muted);
++        }
++        .actions {
++            display: grid;
++            gap: 12px;
++        }
++    </style>
++</head>
++<body>
++    <main>
++        <h1>Persona / Skin / Announce Control</h1>
++        <p>這個頁面只管理角色設定、Live2D 皮膚，以及主動播報項目，不直接修改大前端打包程式。</p>
++
++        <div class="grid">
++            <section class="panel">
++                <label for="personaSelect">Persona</label>
++                <select id="personaSelect"></select>
++                <div class="meta" id="personaMeta"></div>
++            </section>
++
++            <section class="panel">
++                <label for="skinSelect">Skin</label>
++                <select id="skinSelect"></select>
++                <div class="meta" id="skinMeta"></div>
++            </section>
++        </div>
++
++        <section class="panel" style="margin-top:16px;">
++            <label>Announce Sources</label>
++            <div id="announceList" class="announce-list"></div>
++        </section>
++
++        <section class="panel" style="margin-top:16px;">
++            <div class="actions">
++                <button id="applyButton">Apply Changes</button>
++                <button id="refreshButton" type="button">Reload State</button>
++            </div>
++            <div class="status" id="status">Loading…</div>
++        </section>
++    </main>
++
++    <script>
++        const statusEl = document.getElementById("status");
++        const personaSelect = document.getElementById("personaSelect");
++        const skinSelect = document.getElementById("skinSelect");
++        const announceList = document.getElementById("announceList");
++        const personaMeta = document.getElementById("personaMeta");
++        const skinMeta = document.getElementById("skinMeta");
++
++        let latestCatalog = null;
++
++        function setStatus(text, isError = false) {
++            statusEl.textContent = text;
++            statusEl.style.color = isError ? "#a12626" : "#5c5c63";
++        }
++
++        function checkboxValues() {
++            return Array.from(document.querySelectorAll("input[data-announce-id]:checked"))
++                .map((node) => node.dataset.announceId);
++        }
++
++        function renderCatalog(payload) {
++            latestCatalog = payload;
++
++            personaSelect.innerHTML = "";
++            for (const item of payload.catalogs.personas) {
++                const opt = document.createElement("option");
++                opt.value = item.id;
++                opt.textContent = item.label;
++                personaSelect.appendChild(opt);
++            }
++
++            skinSelect.innerHTML = "";
++            for (const item of payload.catalogs.skins) {
++                const opt = document.createElement("option");
++                opt.value = item.id;
++                opt.textContent = item.label;
++                skinSelect.appendChild(opt);
++            }
++
++            personaSelect.value = payload.state.selected_persona_id;
++            skinSelect.value = payload.state.selected_skin_id;
++            personaMeta.textContent = payload.persona.character_name + " / " + payload.persona.speaker_name;
++            skinMeta.textContent = payload.skin.live2d_model_name;
++
++            announceList.innerHTML = "";
++            for (const item of payload.catalogs.announces) {
++                const wrap = document.createElement("label");
++                wrap.className = "announce-item";
++                const checked = payload.state.enabled_announce_ids.includes(item.id) ? "checked" : "";
++                wrap.innerHTML = `
++                    <input type="checkbox" data-announce-id="${item.id}" ${checked}>
++                    <div>
++                        <div>${item.label}</div>
++                        <div class="meta">${item.provider} / abs ${item.threshold_abs_usdt} / pct ${item.threshold_pct}%</div>
++                    </div>
++                `;
++                announceList.appendChild(wrap);
++            }
++        }
++
++        async function loadState() {
++            setStatus("Loading…");
++            try {
++                const res = await fetch("/local-control/catalog");
++                const data = await res.json();
++                renderCatalog(data);
++                setStatus("State loaded.");
++            } catch (err) {
++                setStatus("Failed to load state: " + err, true);
++            }
++        }
++
++        async function applyState() {
++            setStatus("Applying changes…");
++            try {
++                const res = await fetch("/local-control/state", {
++                    method: "PUT",
++                    headers: { "Content-Type": "application/json" },
++                    body: JSON.stringify({
++                        selected_persona_id: personaSelect.value,
++                        selected_skin_id: skinSelect.value,
++                        enabled_announce_ids: checkboxValues()
++                    })
++                });
++                const data = await res.json();
++                renderCatalog(data);
++                setStatus("Applied. Connected clients should receive the new persona / skin.");
++            } catch (err) {
++                setStatus("Failed to apply changes: " + err, true);
++            }
++        }
++
++        document.getElementById("applyButton").addEventListener("click", applyState);
++        document.getElementById("refreshButton").addEventListener("click", loadState);
++        personaSelect.addEventListener("change", () => {
++            if (!latestCatalog) return;
++            const item = latestCatalog.catalogs.personas.find((entry) => entry.id === personaSelect.value);
++            if (item) {
++                personaMeta.textContent = item.character_name + " / " + item.speaker_name;
++            }
++        });
++        skinSelect.addEventListener("change", () => {
++            if (!latestCatalog) return;
++            const item = latestCatalog.catalogs.skins.find((entry) => entry.id === skinSelect.value);
++            if (item) {
++                skinMeta.textContent = item.live2d_model_name;
++            }
++        });
++
++        loadState();
++    </script>
++</body>
++</html>
