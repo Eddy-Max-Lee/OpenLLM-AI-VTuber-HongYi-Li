@@ -1,0 +1,518 @@
+﻿diff --git a/index.html b/index.html
+index 61cd6a5..4890fe7 100644
+--- a/index.html
++++ b/index.html
+@@ -4,6 +4,7 @@
+     <meta charset="UTF-8" />
+     <title>Open-LLM-Vtuber</title>
+     <script type="module" crossorigin src="./assets/main-nu7uwxNJ.js"></script>
++    <script defer src="./local-control-overlay.js"></script>
+     <link rel="stylesheet" crossorigin href="./assets/main-QEkl09-0.css">
+   </head>
+ 
+diff --git a/local-control-overlay.js b/local-control-overlay.js
+new file mode 100644
+index 0000000..4b26a5d
+--- /dev/null
++++ b/local-control-overlay.js
+@@ -0,0 +1,500 @@
++(function () {
++    const PANEL_ID = "local-control-overlay";
++    const TOGGLE_ID = "local-control-toggle";
++    const BACKDROP_ID = "local-control-backdrop";
++    const STORAGE_KEY = "localControlOverlayOpen";
++
++    const state = {
++        catalog: null,
++        loading: false,
++        saving: false,
++        open: false,
++    };
++
++    function ready(fn) {
++        if (document.readyState === "loading") {
++            document.addEventListener("DOMContentLoaded", fn, { once: true });
++            return;
++        }
++        fn();
++    }
++
++    function el(tag, attrs = {}, children = []) {
++        const node = document.createElement(tag);
++        for (const [key, value] of Object.entries(attrs)) {
++            if (key === "className") {
++                node.className = value;
++            } else if (key === "text") {
++                node.textContent = value;
++            } else if (key === "html") {
++                node.innerHTML = value;
++            } else {
++                node.setAttribute(key, value);
++            }
++        }
++        for (const child of children) {
++            if (child) {
++                node.appendChild(child);
++            }
++        }
++        return node;
++    }
++
++    function styles() {
++        return `
++#${TOGGLE_ID} {
++    position: fixed;
++    top: 18px;
++    right: 20px;
++    z-index: 10020;
++    border: 0;
++    border-radius: 999px;
++    padding: 10px 14px;
++    font: 600 14px/1.2 "Segoe UI", "Noto Sans TC", sans-serif;
++    color: #f7fafc;
++    background: rgba(17, 24, 39, 0.88);
++    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
++    cursor: pointer;
++    backdrop-filter: blur(12px);
++}
++#${TOGGLE_ID}[data-open="true"] {
++    background: rgba(99, 102, 241, 0.92);
++}
++#${BACKDROP_ID} {
++    position: fixed;
++    inset: 0;
++    background: rgba(15, 23, 42, 0.32);
++    z-index: 10010;
++    opacity: 0;
++    pointer-events: none;
++    transition: opacity 180ms ease;
++}
++#${BACKDROP_ID}[data-open="true"] {
++    opacity: 1;
++    pointer-events: auto;
++}
++#${PANEL_ID} {
++    position: fixed;
++    top: 0;
++    right: 0;
++    width: min(420px, calc(100vw - 16px));
++    height: 100vh;
++    z-index: 10030;
++    background: rgba(17, 24, 39, 0.97);
++    color: #e5e7eb;
++    box-shadow: -24px 0 60px rgba(0, 0, 0, 0.32);
++    transform: translateX(100%);
++    transition: transform 180ms ease;
++    font-family: "Segoe UI", "Noto Sans TC", sans-serif;
++    display: grid;
++    grid-template-rows: auto 1fr auto;
++}
++#${PANEL_ID}[data-open="true"] {
++    transform: translateX(0);
++}
++#${PANEL_ID} * {
++    box-sizing: border-box;
++}
++.lc-header {
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    gap: 12px;
++    padding: 16px 18px 12px;
++    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
++}
++.lc-title {
++    font-size: 16px;
++    font-weight: 700;
++}
++.lc-subtitle {
++    margin-top: 4px;
++    color: #94a3b8;
++    font-size: 12px;
++}
++.lc-icon-button {
++    width: 34px;
++    height: 34px;
++    border: 0;
++    border-radius: 10px;
++    color: #e5e7eb;
++    background: rgba(51, 65, 85, 0.9);
++    cursor: pointer;
++}
++.lc-body {
++    overflow: auto;
++    padding: 16px 18px 24px;
++}
++.lc-section {
++    margin-bottom: 18px;
++}
++.lc-section-title {
++    font-size: 12px;
++    font-weight: 700;
++    color: #94a3b8;
++    text-transform: uppercase;
++    letter-spacing: 0.04em;
++    margin-bottom: 10px;
++}
++.lc-field {
++    margin-bottom: 12px;
++}
++.lc-label {
++    display: block;
++    margin-bottom: 6px;
++    font-size: 13px;
++    color: #cbd5e1;
++}
++.lc-select {
++    width: 100%;
++    min-height: 40px;
++    padding: 10px 12px;
++    border: 1px solid rgba(148, 163, 184, 0.22);
++    border-radius: 10px;
++    background: rgba(15, 23, 42, 0.95);
++    color: #f8fafc;
++    font-size: 14px;
++}
++.lc-meta {
++    margin-top: 6px;
++    color: #94a3b8;
++    font-size: 12px;
++    line-height: 1.5;
++}
++.lc-announces {
++    display: grid;
++    gap: 10px;
++}
++.lc-announce-item {
++    display: grid;
++    grid-template-columns: 18px 1fr;
++    gap: 10px;
++    align-items: start;
++    padding: 12px;
++    border-radius: 12px;
++    border: 1px solid rgba(148, 163, 184, 0.18);
++    background: rgba(30, 41, 59, 0.72);
++}
++.lc-announce-item input {
++    margin: 2px 0 0;
++}
++.lc-announce-name {
++    font-size: 14px;
++    font-weight: 600;
++    color: #f8fafc;
++}
++.lc-announce-meta {
++    margin-top: 4px;
++    color: #94a3b8;
++    font-size: 12px;
++    line-height: 1.5;
++}
++.lc-footer {
++    padding: 14px 18px 18px;
++    border-top: 1px solid rgba(148, 163, 184, 0.18);
++    background: rgba(15, 23, 42, 0.96);
++}
++.lc-status {
++    min-height: 18px;
++    margin-bottom: 12px;
++    color: #94a3b8;
++    font-size: 12px;
++}
++.lc-status[data-variant="error"] {
++    color: #fca5a5;
++}
++.lc-actions {
++    display: grid;
++    grid-template-columns: 1fr 1fr;
++    gap: 10px;
++}
++.lc-button {
++    min-height: 42px;
++    padding: 10px 12px;
++    border-radius: 10px;
++    border: 0;
++    font-size: 14px;
++    font-weight: 600;
++    cursor: pointer;
++}
++.lc-button-primary {
++    background: #6366f1;
++    color: #ffffff;
++}
++.lc-button-secondary {
++    background: rgba(51, 65, 85, 0.95);
++    color: #e5e7eb;
++}
++.lc-button:disabled {
++    opacity: 0.55;
++    cursor: wait;
++}
++.lc-pills {
++    display: flex;
++    flex-wrap: wrap;
++    gap: 6px;
++    margin-top: 10px;
++}
++.lc-pill {
++    padding: 4px 8px;
++    border-radius: 999px;
++    background: rgba(99, 102, 241, 0.18);
++    color: #c7d2fe;
++    font-size: 11px;
++}
++`;
++    }
++
++    function createShell() {
++        if (document.getElementById(PANEL_ID)) {
++            return;
++        }
++
++        const styleNode = el("style", { text: styles() });
++        document.head.appendChild(styleNode);
++
++        const toggle = el("button", {
++            id: TOGGLE_ID,
++            type: "button",
++            text: "Control",
++            "aria-label": "Open local control panel",
++            title: "Open local control panel",
++        });
++        const backdrop = el("div", { id: BACKDROP_ID, "data-open": "false" });
++        const panel = el("aside", {
++            id: PANEL_ID,
++            "data-open": "false",
++            "aria-hidden": "true",
++        });
++
++        panel.innerHTML = `
++            <div class="lc-header">
++                <div>
++                    <div class="lc-title">Control Center</div>
++                    <div class="lc-subtitle">Persona / Skin / Announce</div>
++                </div>
++                <button type="button" class="lc-icon-button" id="lc-close-button" aria-label="Close control panel">x</button>
++            </div>
++            <div class="lc-body">
++                <section class="lc-section">
++                    <div class="lc-section-title">Current</div>
++                    <div class="lc-meta" id="lc-current-summary">Loading...</div>
++                    <div class="lc-pills" id="lc-current-announces"></div>
++                </section>
++                <section class="lc-section">
++                    <div class="lc-section-title">Persona</div>
++                    <div class="lc-field">
++                        <label class="lc-label" for="lc-persona-select">Persona</label>
++                        <select class="lc-select" id="lc-persona-select"></select>
++                        <div class="lc-meta" id="lc-persona-meta"></div>
++                    </div>
++                </section>
++                <section class="lc-section">
++                    <div class="lc-section-title">Skin</div>
++                    <div class="lc-field">
++                        <label class="lc-label" for="lc-skin-select">Skin</label>
++                        <select class="lc-select" id="lc-skin-select"></select>
++                        <div class="lc-meta" id="lc-skin-meta"></div>
++                    </div>
++                </section>
++                <section class="lc-section">
++                    <div class="lc-section-title">Announce</div>
++                    <div class="lc-announces" id="lc-announce-list"></div>
++                </section>
++            </div>
++            <div class="lc-footer">
++                <div class="lc-status" id="lc-status">Ready.</div>
++                <div class="lc-actions">
++                    <button type="button" class="lc-button lc-button-secondary" id="lc-reload-button">Reload</button>
++                    <button type="button" class="lc-button lc-button-primary" id="lc-apply-button">Apply</button>
++                </div>
++            </div>
++        `;
++
++        document.body.appendChild(toggle);
++        document.body.appendChild(backdrop);
++        document.body.appendChild(panel);
++
++        toggle.addEventListener("click", () => setOpen(!state.open));
++        backdrop.addEventListener("click", () => setOpen(false));
++        panel.querySelector("#lc-close-button").addEventListener("click", () => setOpen(false));
++        panel.querySelector("#lc-reload-button").addEventListener("click", loadCatalog);
++        panel.querySelector("#lc-apply-button").addEventListener("click", applyState);
++        panel.querySelector("#lc-persona-select").addEventListener("change", updatePersonaMeta);
++        panel.querySelector("#lc-skin-select").addEventListener("change", updateSkinMeta);
++        document.addEventListener("keydown", (event) => {
++            if (event.key === "Escape" && state.open) {
++                setOpen(false);
++            }
++        });
++
++        const remembered = window.localStorage.getItem(STORAGE_KEY);
++        setOpen(remembered === "true");
++    }
++
++    function rootNode() {
++        return document.getElementById(PANEL_ID);
++    }
++
++    function setStatus(text, variant) {
++        const node = document.getElementById("lc-status");
++        if (!node) return;
++        node.textContent = text;
++        node.dataset.variant = variant || "normal";
++    }
++
++    function setOpen(open) {
++        state.open = open;
++        const panel = rootNode();
++        const backdrop = document.getElementById(BACKDROP_ID);
++        const toggle = document.getElementById(TOGGLE_ID);
++        if (!panel || !backdrop || !toggle) return;
++        panel.dataset.open = open ? "true" : "false";
++        panel.setAttribute("aria-hidden", open ? "false" : "true");
++        backdrop.dataset.open = open ? "true" : "false";
++        toggle.dataset.open = open ? "true" : "false";
++        toggle.textContent = open ? "Close" : "Control";
++        window.localStorage.setItem(STORAGE_KEY, String(open));
++    }
++
++    function selectedAnnounceIds() {
++        return Array.from(document.querySelectorAll("#lc-announce-list input[type=checkbox]:checked"))
++            .map((node) => node.getAttribute("data-announce-id"))
++            .filter(Boolean);
++    }
++
++    function renderOptions(selectNode, items, selectedId) {
++        selectNode.innerHTML = "";
++        for (const item of items) {
++            const option = el("option", { value: item.id, text: item.label || item.id });
++            selectNode.appendChild(option);
++        }
++        selectNode.value = selectedId;
++    }
++
++    function updatePersonaMeta() {
++        if (!state.catalog) return;
++        const personaId = document.getElementById("lc-persona-select").value;
++        const persona = state.catalog.catalogs.personas.find((item) => item.id === personaId);
++        const node = document.getElementById("lc-persona-meta");
++        if (!node || !persona) return;
++        node.textContent = `${persona.character_name} / ${persona.speaker_name}`;
++    }
++
++    function updateSkinMeta() {
++        if (!state.catalog) return;
++        const skinId = document.getElementById("lc-skin-select").value;
++        const skin = state.catalog.catalogs.skins.find((item) => item.id === skinId);
++        const node = document.getElementById("lc-skin-meta");
++        if (!node || !skin) return;
++        node.textContent = skin.live2d_model_name || skin.id;
++    }
++
++    function renderSummary(payload) {
++        const summary = document.getElementById("lc-current-summary");
++        const pills = document.getElementById("lc-current-announces");
++        if (!summary || !pills) return;
++        summary.textContent = `${payload.persona.label} / ${payload.skin.label}`;
++        pills.innerHTML = "";
++        const enabled = payload.enabled_announces || [];
++        if (!enabled.length) {
++            pills.appendChild(el("div", { className: "lc-pill", text: "No announces enabled" }));
++            return;
++        }
++        for (const announce of enabled) {
++            pills.appendChild(el("div", { className: "lc-pill", text: announce.label }));
++        }
++    }
++
++    function renderCatalog(payload) {
++        state.catalog = payload;
++
++        const personaSelect = document.getElementById("lc-persona-select");
++        const skinSelect = document.getElementById("lc-skin-select");
++        const announceList = document.getElementById("lc-announce-list");
++
++        renderOptions(personaSelect, payload.catalogs.personas, payload.state.selected_persona_id);
++        renderOptions(skinSelect, payload.catalogs.skins, payload.state.selected_skin_id);
++        updatePersonaMeta();
++        updateSkinMeta();
++        renderSummary(payload);
++
++        announceList.innerHTML = "";
++        for (const item of payload.catalogs.announces) {
++            const checked = payload.state.enabled_announce_ids.includes(item.id);
++            const row = el("label", { className: "lc-announce-item" }, [
++                el("input", {
++                    type: "checkbox",
++                    "data-announce-id": item.id,
++                    ...(checked ? { checked: "checked" } : {}),
++                }),
++                el("div", {}, [
++                    el("div", { className: "lc-announce-name", text: item.label }),
++                    el("div", {
++                        className: "lc-announce-meta",
++                        text: `${item.provider} / ${item.symbol || "-"} / abs ${item.threshold_abs_usdt} / pct ${item.threshold_pct}% / ${item.poll_interval_seconds}s`,
++                    }),
++                ]),
++            ]);
++            announceList.appendChild(row);
++        }
++    }
++
++    async function readJson(url, options) {
++        const response = await fetch(url, options);
++        if (!response.ok) {
++            const text = await response.text();
++            throw new Error(text || `HTTP ${response.status}`);
++        }
++        return response.json();
++    }
++
++    async function loadCatalog() {
++        if (state.loading) return;
++        state.loading = true;
++        setStatus("Loading control state...");
++        try {
++            const payload = await readJson("/local-control/catalog");
++            renderCatalog(payload);
++            setStatus("Control state loaded.");
++        } catch (error) {
++            setStatus(`Load failed: ${error.message}`, "error");
++        } finally {
++            state.loading = false;
++        }
++    }
++
++    async function applyState() {
++        if (state.saving) return;
++        const personaSelect = document.getElementById("lc-persona-select");
++        const skinSelect = document.getElementById("lc-skin-select");
++        state.saving = true;
++        setStatus("Applying control state...");
++        document.getElementById("lc-apply-button").disabled = true;
++        document.getElementById("lc-reload-button").disabled = true;
++        try {
++            const payload = await readJson("/local-control/state", {
++                method: "PUT",
++                headers: { "Content-Type": "application/json" },
++                body: JSON.stringify({
++                    selected_persona_id: personaSelect.value,
++                    selected_skin_id: skinSelect.value,
++                    enabled_announce_ids: selectedAnnounceIds(),
++                }),
++            });
++            renderCatalog(payload);
++            setStatus("Applied. Connected clients will use the new persona and skin.");
++        } catch (error) {
++            setStatus(`Apply failed: ${error.message}`, "error");
++        } finally {
++            state.saving = false;
++            document.getElementById("lc-apply-button").disabled = false;
++            document.getElementById("lc-reload-button").disabled = false;
++        }
++    }
++
++    ready(() => {
++        createShell();
++        loadCatalog();
++    });
++})();
