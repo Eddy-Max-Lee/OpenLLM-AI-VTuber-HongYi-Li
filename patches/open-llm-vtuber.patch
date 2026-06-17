@@ -20,11 +20,11 @@ index 510ca20..a86ea33 100644
      if server_config.enable_proxy:
 diff --git a/src/open_llm_vtuber/local_control.py b/src/open_llm_vtuber/local_control.py
 new file mode 100644
-index 0000000..b853cda
+index 0000000..cba10d3
 --- /dev/null
 +++ b/src/open_llm_vtuber/local_control.py
-@@ -0,0 +1,142 @@
-+from __future__ import annotations
+@@ -0,0 +1,163 @@
++﻿from __future__ import annotations
 +
 +import json
 +from pathlib import Path
@@ -44,7 +44,7 @@ index 0000000..b853cda
 +def _read_json(path: Path, default: Any):
 +    if not path.exists():
 +        return default
-+    return json.loads(path.read_text(encoding="utf-8"))
++    return json.loads(path.read_text(encoding="utf-8-sig"))
 +
 +
 +def _write_json(path: Path, data: Any) -> None:
@@ -107,6 +107,26 @@ index 0000000..b853cda
 +    }
 +
 +
++def _text_block(title: str, value: Any) -> str:
++    if not value:
++        return ""
++    if isinstance(value, str):
++        text = value.strip()
++    else:
++        text = json.dumps(value, ensure_ascii=False, indent=2)
++    if not text:
++        return ""
++    return f"\n\n[{title}]\n{text}"
++
++
++def compose_vtuber_persona_prompt(persona: dict[str, Any]) -> str:
++    prompt = str(persona.get("vtuber_persona_prompt", "")).strip()
++    prompt += _text_block("Role core concept", persona.get("core_concept"))
++    prompt += _text_block("Deep memory", persona.get("deep_memory"))
++    prompt += _text_block("Persona restrictions and negative prompts", persona.get("negative_prompts"))
++    return prompt.strip()
++
++
 +def resolve_selection() -> dict[str, Any]:
 +    state = load_state()
 +    catalogs = load_catalogs()
@@ -157,8 +177,9 @@ index 0000000..b853cda
 +            "character_name",
 +            character.get("character_name", "AI"),
 +        )
-+        if persona.get("vtuber_persona_prompt"):
-+            character["persona_prompt"] = persona["vtuber_persona_prompt"]
++        persona_prompt = compose_vtuber_persona_prompt(persona)
++        if persona_prompt:
++            character["persona_prompt"] = persona_prompt
 +
 +    if skin:
 +        if skin.get("live2d_model_name"):

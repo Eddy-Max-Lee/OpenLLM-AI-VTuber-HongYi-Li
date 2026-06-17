@@ -70,15 +70,36 @@ app = FastAPI(title="Hung-Yi Inspired RAG Proxy", version="0.1.0")
 def read_system_prompt() -> str:
     persona = selected_persona()
     rag_prompt = str(persona.get("rag_system_prompt", "")).strip()
-    if rag_prompt:
-        return rag_prompt
-    return PROMPT_PATH.read_text(encoding="utf-8")
+    if not rag_prompt:
+        rag_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    return compose_rag_persona_prompt(persona, rag_prompt)
 
 
 def _read_json(path: Path, default):
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _text_block(title: str, value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = json.dumps(value, ensure_ascii=False, indent=2)
+    if not text:
+        return ""
+    return f"\n\n[{title}]\n{text}"
+
+
+def compose_rag_persona_prompt(persona: dict[str, Any], base_prompt: str) -> str:
+    prompt = base_prompt.strip()
+    prompt += _text_block("角色核心概念", persona.get("core_concept"))
+    prompt += _text_block("深層記憶", persona.get("deep_memory"))
+    prompt += _text_block("角色限制與負面提示詞", persona.get("negative_prompts"))
+    prompt += _text_block("風險政策", persona.get("risk_policy"))
+    return prompt.strip()
 
 
 def selected_persona() -> dict[str, Any]:
